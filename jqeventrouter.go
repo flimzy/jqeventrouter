@@ -112,7 +112,6 @@ type EventListener struct {
 func Listen(event string, handler Handler) *EventListener {
 	console.Log("Adding jQuery event listener")
 	listener := func(event *jquery.Event, data *js.Object) bool {
-		console.Log("listener")
 		return handler.HandleEvent(event, data, url.Values{})
 	}
 	jquery.NewJQuery(js.Global.Get("document")).On(event, listener)
