@@ -1,40 +1,40 @@
 package jqeventrouter
 
 import (
-	"strings"
-// 	"sync"
+	"fmt"
+	"net/url"
 
 	"github.com/gopherjs/gopherjs/js"
 	"github.com/gopherjs/jquery"
-// 	"github.com/armon/go-radix"
 	"honnef.co/go/js/console"
 )
 
 type EventMux struct {
-// 	mu      sync.RWMutex
-//	t       *radix.Tree
 	paths   map[string]*muxEntry
 	uriFunc func(*jquery.Event, *js.Object) string
 }
 
 type muxEntry struct {
-	h       Handler
-	pattern string
-	params  string
+	h    Handler
+	path string
 }
 
 func NewEventMux() *EventMux {
 	return &EventMux{paths: make(map[string]*muxEntry)}
 }
 
-
-func (mux *EventMux) HandleEvent(event *jquery.Event, data *js.Object) bool {
-	uri := mux.getUri(event, data)
-	console.Log("URI = %s", uri)
-	for path,entry := range mux.paths {
-		if strings.HasPrefix(uri,path) {
+func (mux *EventMux) HandleEvent(event *jquery.Event, data *js.Object, _ url.Values) bool {
+	rawUri := mux.getUri(event, data)
+	reqUri, err := url.ParseRequestURI(rawUri)
+	if err != nil {
+		fmt.Printf("Error parsing path '%s': %s\n", rawUri, err)
+		return true
+	}
+	console.Log("URI = %s", rawUri)
+	for path, entry := range mux.paths {
+		if reqUri.Path == path {
 			// We found a match!
-			return entry.h.HandleEvent(event, data)
+			return entry.h.HandleEvent(event, data, reqUri.Query())
 		}
 	}
 	return true
@@ -54,38 +54,32 @@ func (mux *EventMux) getUri(event *jquery.Event, data *js.Object) string {
 	return js.Global.Get("location").Get("href").String()
 }
 
-// Handle registers the handler for the given pattern. If a handler already 
-// exists for pattern, Handle panics.
-func (mux *EventMux) Handle(pattern string, handler Handler) {
-	if pattern == "" {
-		panic("eventrouter: invalid pattern " + pattern)
+// Handle registers the handler for the given path. If a handler already
+// exists for path, or the path is not valid in a URL, Handle panics.
+func (mux *EventMux) Handle(path string, handler Handler) {
+	if path == "" {
+		panic("jqeventrouter: empty path")
 	}
 	if handler == nil {
-		panic("eventrouter: nil handler")
+		panic("jqeventrouter: nil handler")
 	}
-	if _,ok := mux.paths[pattern]; ok {
-		panic("eventrouter: multiple registrations for " + pattern)
+	if parsed, err := url.ParseRequestURI(path); err != nil {
+		panic(fmt.Sprintf("jqeventrouter: Invalid path '%s': %s", path, err))
+	} else if parsed.Path != path {
+		panic(fmt.Sprintf("jqeventrouter: Invalid path '%s'. Did you mean '%s'?", path, parsed.Path))
 	}
-	
-	var params string
-
-	// Check for any named parameters
-	if i := strings.LastIndexAny(pattern,":*"); i > -1 {
-		if j := strings.LastIndex(pattern, "/"); j < i {
-			params = pattern[i:]
-			pattern = pattern[0:i-1]
-		}
+	if _, ok := mux.paths[path]; ok {
+		panic("jqeventrouter: multiple registrations for " + path)
 	}
 
-	mux.paths[pattern] = &muxEntry{
-		h: handler,
-		pattern: pattern,
-		params: params,
+	mux.paths[path] = &muxEntry{
+		h:    handler,
+		path: path,
 	}
 }
 
-func (mux *EventMux) HandleFunc(pattern string, handler func(*jquery.Event, *js.Object) bool) {
-	mux.Handle(pattern, HandlerFunc(handler))
+func (mux *EventMux) HandleFunc(path string, handler func(*jquery.Event, *js.Object, url.Values) bool) {
+	mux.Handle(path, HandlerFunc(handler))
 }
 
 // Listen is a convenience function which calls Listen(event,mux)
@@ -94,17 +88,17 @@ func (mux *EventMux) Listen(event string) {
 }
 
 type Handler interface {
-	HandleEvent(event *jquery.Event, data *js.Object) bool
+	HandleEvent(event *jquery.Event, data *js.Object, params url.Values) bool
 }
 
 // The HandlerFunc type is an adaptor to allow the use of ordinary functions
 // as Event handlers. If f is a function of the appropriate signature, HandlerFunc(f)
 // is a Handler object that calls f.
-type HandlerFunc func(*jquery.Event, *js.Object) bool
+type HandlerFunc func(*jquery.Event, *js.Object, url.Values) bool
 
 // HandleEvent calls f(this,event)
-func (f HandlerFunc) HandleEvent(event *jquery.Event, data *js.Object) bool {
-	return f(event, data)
+func (f HandlerFunc) HandleEvent(event *jquery.Event, data *js.Object, p url.Values) bool {
+	return f(event, data, p)
 }
 
 type EventListener struct {
@@ -114,18 +108,17 @@ type EventListener struct {
 }
 
 // Listen attaches the Handler to the window and begins listening for the specified
-// jquery event, reterning an EventListener object
+// jQuery event, reterning an EventListener object
 func Listen(event string, handler Handler) *EventListener {
 	console.Log("Adding jQuery event listener")
 	listener := func(event *jquery.Event, data *js.Object) bool {
-		console.Log("listener")
-		return handler.HandleEvent(event, data)
+		return handler.HandleEvent(event, data, url.Values{})
 	}
 	jquery.NewJQuery(js.Global.Get("document")).On(event, listener)
 	return &EventListener{event: event, listener: listener}
 }
 
-// UnListen detaches the EventListener from the window. 
+// UnListen detaches the EventListener from the window.
 func (l *EventListener) UnListen() {
 	if l.detached == true {
 		panic("Already detached")
@@ -137,7 +130,7 @@ func (l *EventListener) UnListen() {
 // NullHandler returns a null Handler object, which unconditionally returns true.
 // It can be used for terminating event chains that don't need to affect the page.
 func NullHandler() Handler {
-	return HandlerFunc(func(_ *jquery.Event, _ *js.Object) bool {
+	return HandlerFunc(func(_ *jquery.Event, _ *js.Object, _ url.Values) bool {
 		return true
 	})
 }
